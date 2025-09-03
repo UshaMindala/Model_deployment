@@ -34,30 +34,70 @@ def gw_model_v2( farmid, measure_date ):
         cursor.execute("""
                 
         with GroupedPoints as
-        (SELECT 
-                app.*, 
-                ((tare - rawdistance) * 0.0859536) AS height,
-                    pad.paddock, pad.shape.STAsText() as paddock_coordinates,
-                    fm.farm
-            FROM 
-                dbo.appupload app 
-                INNER JOIN dbo.Paddocks pad 
-                ON app.paddockid = pad.id 
-                AND app.farmid = pad.farmid
-                INNER JOIN dbo.farm fm  
-                ON pad.farmid = fm.id
 
-            WHERE
-                app.farmid = """ + farmid + """ AND 
-                timestamp = '""" + measure_date + """')
-        SELECT 
-                farmid,farm,paddockid,paddock,paddock_coordinates,timestamp,lat,lng,
-                AVG(height) AS mean_height,count(*)
-            FROM 
-                GroupedPoints
-            GROUP BY 
-                farmid,farm,paddockid,paddock,paddock_coordinates,timestamp,lat,lng
-            ORDER BY farmid,paddockid,paddock,paddock_coordinates,timestamp
+            (SELECT 
+                    app.*, 
+                    ((tare - rawdistance) * 0.0859536) AS height,
+                        pad.paddock, pad.shape.STAsText() as paddock_coordinates,
+                        fm.farm
+                FROM 
+                    dbo.appupload app 
+                    INNER JOIN dbo.Paddocks pad 
+                    ON app.paddockid = pad.id 
+                    AND app.farmid = pad.farmid
+                    INNER JOIN dbo.farm fm  
+                    ON pad.farmid = fm.id
+
+                WHERE
+                    app.farmid = """ + farmid + """ AND 
+                    timestamp = '""" + measure_date + """'),
+
+         weather as
+        
+                (
+                     SELECT 
+                    farm_id,-- max([date]) as timestamp,
+                    ((AVG((temperature_max_F + temperature_min_F)/2) - 32) * (5/9)) AS Avg_21D_Temp_C,
+                    SUM(ETo_in) AS Cum_21D_ETo_in,
+                    SUM(precipitation_in) AS Cum_21D_Precip_in,
+                    SUM(GDD) AS Cum_21D_GDD,
+                    AVG(Available_Soil_Water_in) AS Avg_21D_SWB_in,
+                    AVG(Available_Soil_Water_percent) AS Avg_21D_SWB_pct
+                FROM dbo.FarmWeatherData
+                
+                WHERE farm_id = """ + farmid + """
+                  AND [date] > DATEADD(DAY, -23, '""" + measure_date + """')
+                  AND [date] < DATEADD(DAY, -3, '""" + measure_date + """')
+                  
+                GROUP BY farm_id
+                
+           
+                ),
+                
+         hgt as (     
+                SELECT 
+                        farmid,farm,paddockid,paddock,paddock_coordinates,timestamp,lat,lng,
+                        AVG(height) AS mean_height
+                        --,count(*) as count
+                    FROM 
+                        GroupedPoints
+        
+                    GROUP BY 
+                        farmid,farm,paddockid,paddock,paddock_coordinates,timestamp,lat,lng
+          --          ORDER BY farmid,paddockid,paddock,paddock_coordinates,timestamp
+         )
+        
+          
+         select hgt.*, weather.*, 
+         round((-26.05 + (8.68 * Avg_21D_Temp_C) + (0.021 * power(Avg_21D_Temp_C , 2)) - 
+         (0.0071 * power(Avg_21D_Temp_C , 3)) )/100 , 2) as Growth_rt_21D,
+         round((Avg_21D_SWB_pct *  round((-26.05 + (8.68 * Avg_21D_Temp_C) + (0.021 * power(Avg_21D_Temp_C , 2))
+         - (0.0071 * power(Avg_21D_Temp_C , 3)) )/100 , 2)) ,2) as GR_SWB_21D
+        
+         from hgt
+         left join weather
+         on weather.farm_id = hgt.farmid
+         ORDER BY farmid,paddockid,paddock,paddock_coordinates,timestamp
 
         """)
 
@@ -473,14 +513,14 @@ def gw_model_v2( farmid, measure_date ):
         import joblib
 
         # Define file paths for the model and scaler
-        model_path = "saved_models/PastureCast-v1.0.0.joblib"  # Update to actual path if different
-        preprocessor_path = "saved_models/Preprocessor-v1.0.0.joblib"  # Ensure this matches saved version
+        model_path = "saved_models/PastureCast-v1.1.1.joblib"  # Update to actual path if different
+        preprocessor_path = "saved_models/Preprocessor-v1.1.1.joblib"  # Ensure this matches saved version
 
         # Load the trained model and scaler
         loaded_model = joblib.load(model_path)
         loaded_preprocessor = joblib.load(preprocessor_path)
 
-        features= ['MeanHeight(mm)', 'NDVI_mean', 'GNDVI_mean', 'SAVI_mean', 'JulianDate']
+        features= ['MeanHeight(mm)', 'Julian_Cos',  'SAVI_mean', 'EVI_mean', 'NDVI_mean', 'NDRE_mean', 'Avg_21D_SWB_pct']
         X_new_preprocessed = loaded_preprocessor.transform(model_df[features])
         y_new_pred = loaded_model.predict(X_new_preprocessed)
         model_df["PredictedBiomass(kg/ha)"] = y_new_pred
